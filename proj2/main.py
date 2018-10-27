@@ -1,3 +1,24 @@
+'''
+	two functions in this file:
+	train(): used to search dropout parameters and find the correct model
+			 the result is not accurate and need to train the same model in test()
+	test() : used to train the model best suited found in train()
+			 if you want to rerun the program to get the prediction, run the following command:
+			 python main.py test -m <"cv" or "bootstrap"> -dr1 <dropout1> -dr2 <dropout2> -dr3 <dropout3> -i <iteration> -lr <learning rate>
+
+			 suggested parameters:
+			 dropout1 = 0.2
+			 dropout2 = 0.2
+			 dropout3 = 0.2
+			 learning rate = 0.0002
+			 if you choose "cv", you will use 10 fold cross validation, suggested iteration is 5
+			 if you choose "bootstrap", you will use bootstrap strategy, suggested iteration is >=40
+
+			 after running, the model having the highest score will be saved,
+			 				resulted test prediction file will be "avr" and "vote" .csv file, 
+			 				which base on averaging prediction scores and voting strategy accordingly. 
+	for dropout parameters in drpout1 - 1024 - dropout2 - 1024 - dropout3 - 3 - softmax model, refer to result_record.csv
+'''
 import tensorflow as tf
 import argparse
 import logging
@@ -26,12 +47,6 @@ KB.set_session(sess)
 
 print(device_lib.list_local_devices())
 print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-
-# import keras.losses 
-
-
-# matplotlib.use("Agg")
-# plt.switch_backend('Agg')
 
 logger = logging.getLogger("model")
 logger.setLevel(logging.DEBUG)
@@ -554,134 +569,7 @@ def test(args):
 			writer = csv.writer(outfile, delimiter = ",")
 			writer.writerow(keys)
 			writer.writerows(zip(*[d[key] for key in keys]))
-		sys.stdout.flush()		
-
-def apply_meam(args):
-	'''
-		we compare two methods: bootstrap and multiple cross validation
-	'''
-	scaler = StandardScaler()
-	config = Config(args)
-	train_data = np.load(args.data_train)
-	X_test = np.load(args.data_test)
-	dev_data = np.load(args.data_dev)
-
-	train_data_all = np.concatenate([train_data, dev_data], axis=0)
-
-	dropout1 = args.dropout1
-	dropout2 = args.dropout2
-	dropout3 = args.dropout3
-
-	model = Sequential()
-	model.add(Dropout(dropout1,input_shape=(config.input_size,)))
-	model.add(Dense(1024, input_dim=config.input_size, activation='relu', 
-		kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-		kernel_regularizer=keras.regularizers.l2(config.l2),
-		use_bias=True, bias_initializer=keras.initializers.Zeros(),
-		))
-	model.add(Dropout(dropout2))
-	model.add(Dense(1024, input_dim=config.input_size, activation='relu', 
-		kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-		kernel_regularizer=keras.regularizers.l2(config.l2),
-		use_bias=True, bias_initializer=keras.initializers.Zeros(),
-		))
-	model.add(Dropout(dropout3))	
-	model.add(Dense(3,  activation='softmax',
-		kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-		kernel_regularizer=keras.regularizers.l2(config.l2),
-		use_bias=True, bias_initializer=keras.initializers.Zeros(),
-		))		
-	# Compile model
-	opt = keras.optimizers.Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=None, decay=1e-6, amsgrad=False)
-	model.compile(loss='categorical_crossentropy', optimizer=opt, metrics=[My_score])#"accuracy"
-	init_weights = model.get_weights()
-	# Fit the model
-	test_prediction_tot = None
-	dev_prediction_tot = None
-	dev_label_tot = None
-	glob_score = 0
-	if args.method == "bootstrap":
-		for iter in range(args.iteration): 
-			best_score = 0.
-			model.set_weights(init_weights)
-			X_train, y_train, X_dev, y_dev, data_test = get_boostrap_fold(train_data_all, X_test)
-			for i in range(50):
-				model.fit(X_train, y_train, epochs=1, batch_size=config.batch_size, verbose=0)
-				R_score = model.evaluate(X_dev, y_dev,verbose=0)[1]
-				if R_score > best_score:
-					test_prediction = model.predict(data_test)
-					test_prediction = np.argmax(test_prediction, axis=1)[:,np.newaxis]
-					dev_prediction = model.predict(X_dev)
-					model.save("boot_strap_{}_{}_{}_iter_{}.h5".format(dropout1, dropout2, dropout3, iter))
-					best_score=R_score
-				print("\r<<<<<<< loading {} / 50	score:{:.4f} best:{:.4f}>>>>>>>".format(i+1, R_score, best_score), end='')
-				sys.stdout.flush()
-
-			if test_prediction_tot is not None:
-				test_prediction_tot = np.concatenate([test_prediction_tot,test_prediction], axis=1)
-			else:
-				test_prediction_tot = test_prediction
-
-			if dev_prediction_tot is not None:
-				dev_prediction_tot = np.concatenate([dev_prediction_tot,dev_prediction], axis=0)
-			else:
-				dev_prediction_tot = dev_prediction
-
-			if dev_label_tot is not None:
-				dev_label_tot = np.concatenate([dev_label_tot,y_dev], axis=0)
-			else:
-				dev_label_tot = y_dev
-			print()
-			dev_score = balanced_accuracy_score(np.argmax(dev_label_tot,axis=1), np.argmax(dev_prediction_tot,axis=1))
-			print("<<<<<<< {} {} {} iteration {} cumulated score: {} >>>>>>>>".format(dropout1, dropout2, dropout3, iter, dev_score))
-			print()
-			sys.stdout.flush()	
-		test_prediction_tot = test_prediction_tot.astype(int)
-		print(test_prediction_tot.shape)
-		test_prediction_tot = np.apply_along_axis(lambda x: np.bincount(x, minlength=3), 1, test_prediction_tot)
-		test_prediction_tot = np.argmax(test_prediction_tot,axis=1)
-		test_prediction_tot = test_prediction_tot.astype(int)
-		d = {"id": range(4100), "y": test_prediction_tot}
-		keys = sorted(d.keys())
-		with open("bootstrap_vote_{}_{}_{}_iter_{}_foo.csv".format(dropout1, dropout2, dropout3, args.iteration), "w") as outfile:
-			writer = csv.writer(outfile, delimiter = ",")
-			writer.writerow(keys)
-			writer.writerows(zip(*[d[key] for key in keys]))
-		sys.stdout.flush()		
-
-	elif args.method == "cv":
-		for iter in range(args.iteration):
-			X_train_folds, y_train_folds, X_dev_folds, y_dev_folds, test_folds = get_cv_folds(train_data_all, X_test)
-			for k in range(10):
-				best_score = 0.
-				model.set_weights(init_weights)
-				for i in range(50):
-					model.fit(X_train_folds[k], y_train_folds[k], epochs=1, batch_size=config.batch_size, verbose=0)
-					R_score = model.evaluate(X_dev_folds[k], y_dev_folds[k],verbose=0)[1]
-					if R_score > best_score:
-						test_prediction = model.predict(test_folds[k])
-						test_prediction = np.argmax(test_prediction, axis=1)[:,np.newaxis]
-						dev_prediction = model.predict(X_dev_folds[k])
-						model.save("cv_{}_{}_{}_iter_{}_k_{}.h5".format(dropout1, dropout2, dropout3, iter, k))
-						best_score=R_score
-					print("\r<<<<<<< loading {} / 50	score:{:.4f} best:{:.4f}>>>>>>>".format(i+1, R_score, best_score), end='')
-					sys.stdout.flush()
-
-				if test_prediction_tot is not None:
-					test_prediction_tot = np.concatenate([test_prediction_tot,test_prediction], axis=1)
-				else:
-					test_prediction_tot = test_prediction
-		test_prediction_tot = test_prediction_tot.astype(int)
-		test_prediction_tot = np.apply_along_axis(lambda x: np.bincount(x, minlength=3), 1, test_prediction_tot)
-		test_prediction_tot = np.argmax(test_prediction_tot,axis=1)
-		test_prediction_tot = test_prediction_tot.astype(int)
-		d = {"id": range(4100), "y": test_prediction_tot}
-		keys = sorted(d.keys())
-		with open("cv_vote_{}_{}_{}_iter_{}foo.csv".format(dropout1, dropout2, dropout3,args.iteration), "w") as outfile:
-			writer = csv.writer(outfile, delimiter = ",")
-			writer.writerow(keys)
-			writer.writerows(zip(*[d[key] for key in keys]))
-		sys.stdout.flush()			
+		sys.stdout.flush()	
 
 
 if __name__ == "__main__":
